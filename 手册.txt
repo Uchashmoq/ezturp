@@ -1,0 +1,5 @@
+第一次打开go build 生成exe
+
+在exe所在目录下右键，在终端中打开
+./ezturp -cm -config examples/sunshineClient2.json 运行客户端，按Ctrl+C退出
+moonlight右上角+，45.76.162.86

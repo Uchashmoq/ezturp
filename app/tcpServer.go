@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"ezturp/protocol"
+	"ezturp/tools"
 	"log"
 	"math/rand"
 	"net"
@@ -12,12 +13,14 @@ import (
 
 const (
 	BUF_SIZE                 = 1024 * 8
-	INTERNAL_CONN_IDLE       = 1000000000
+	INTERNAL_CONN_IDLE       = 3 * time.Minute
 	KEEP_ALIVE               = INTERNAL_CONN_IDLE / 2
 	MAINTAIN_UDP_CLIENT_ADDR = 60
 )
 
 type TcpServer struct {
+	Name                string
+	logger              tools.Logger
 	reacceptSig         chan interface{}
 	internalAcceptedSig chan interface{}
 	externalConnMutex   sync.Mutex
@@ -30,6 +33,7 @@ func (s *TcpServer) init() {
 	s.reacceptSig = make(chan interface{}, 1)
 	s.internalAcceptedSig = make(chan interface{}, 1)
 	s.externalConns = map[uint32]net.Conn{}
+	s.logger = tools.Logger{"TcpServer", s.Name}
 }
 
 func (s *TcpServer) Listen(internalAddr, externalAddr string) error {
@@ -52,7 +56,7 @@ func (s *TcpServer) Listen(internalAddr, externalAddr string) error {
 
 func (s *TcpServer) listenInternal(listener net.Listener) {
 	for {
-		log.Printf("listen internal connection %v", listener.Addr())
+		s.logger.Info("listen internal connection %v", listener.Addr())
 		internalConn, err := listener.Accept()
 		if err != nil {
 			log.Println(err)
@@ -63,7 +67,7 @@ func (s *TcpServer) listenInternal(listener net.Listener) {
 		s.internalConnMutex.Unlock()
 
 		s.internalAcceptedSig <- struct{}{}
-		log.Printf("internal %v connected", internalConn.RemoteAddr())
+		s.logger.Info("internal %v connected", internalConn.RemoteAddr())
 		<-s.reacceptSig
 
 		s.internalConnMutex.Lock()
@@ -71,7 +75,7 @@ func (s *TcpServer) listenInternal(listener net.Listener) {
 		s.internalConn = nil
 		s.internalConnMutex.Unlock()
 
-		log.Printf("internal %v disconnected", internalConn.RemoteAddr())
+		s.logger.Info("internal %v disconnected", internalConn.RemoteAddr())
 	}
 }
 func (s *TcpServer) internalNil() bool {
@@ -80,7 +84,7 @@ func (s *TcpServer) internalNil() bool {
 	return s.internalConn == nil
 }
 func (s *TcpServer) listenExternal(listener net.Listener) {
-	log.Printf("listen external connection %v", listener.Addr())
+	s.logger.Info("listen external connection %v", listener.Addr())
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -92,11 +96,11 @@ func (s *TcpServer) listenExternal(listener net.Listener) {
 		}
 		err, id := s.sessionCreate(conn)
 		if err != nil {
-			log.Printf("failed to accept external connection %v", err)
+			s.logger.Error("failed to accept external connection %v", err)
 			conn.Close()
 		}
 		go s.proxy(conn, id)
-		log.Printf("%v connected", conn.RemoteAddr())
+		s.logger.Info("%v connected", conn.RemoteAddr())
 	}
 }
 
@@ -112,7 +116,7 @@ func (s *TcpServer) sessionRemove(id uint32) {
 	defer s.externalConnMutex.Unlock()
 	if conn, ok := s.externalConns[id]; ok {
 		_ = conn.Close()
-		log.Printf("session %v,address %v removed", id, conn.RemoteAddr())
+		s.logger.Debug("session %v,address %v removed", id, conn.RemoteAddr())
 		delete(s.externalConns, id)
 		_ = s.internalWriteFrame(protocol.REMOVE_SESSION, id, []byte{})
 	}
@@ -130,6 +134,7 @@ func (s *TcpServer) internalWriteFrame(t byte, id uint32, data []byte) (err erro
 func (s *TcpServer) sessionCreate(conn net.Conn) (error, uint32) {
 	var id uint32
 	s.externalConnMutex.Lock()
+	defer s.externalConnMutex.Unlock()
 	for {
 		id = rand.Uint32()
 		if _, ok := s.externalConns[id]; !ok {
@@ -141,7 +146,6 @@ func (s *TcpServer) sessionCreate(conn net.Conn) (error, uint32) {
 		return err, 0
 	}
 	s.externalConns[id] = conn
-	s.externalConnMutex.Unlock()
 	return nil, id
 }
 
@@ -191,7 +195,7 @@ func (s *TcpServer) dispatch() {
 		if s.internalNil() {
 			<-s.internalAcceptedSig
 		}
-		t, id, data, err := s.internalReadFrame(time.Now().Add(INTERNAL_CONN_IDLE * time.Second))
+		t, id, data, err := s.internalReadFrame(time.Now().Add(INTERNAL_CONN_IDLE))
 		if err != nil {
 			s.reacceptSig <- struct{}{}
 			time.Sleep(200 * time.Millisecond)
@@ -219,7 +223,7 @@ func (s *TcpServer) handleInternalMsg(conn net.Conn, t byte, id uint32, data []b
 	case protocol.REMOVE_SESSION:
 		s.sessionRemove(id)
 	default:
-		log.Printf("unknown message type : %v in session %v", t, id)
+		s.logger.Warn("unknown message type : %v in session %v", t, id)
 		s.sessionRemove(id)
 	}
 }
